@@ -1,0 +1,31 @@
+[Unit]
+Description=Obscuretone Identity
+After=network.target
+
+[Service]
+Type=simple
+DynamicUser=yes
+StateDirectory=obscuretone-identity
+StateDirectoryMode=0700
+WorkingDirectory=/opt/obscuretone-identity
+Environment=IDENTITY_DATA=/var/lib/obscuretone-identity
+Environment=IDENTITY_ORIGIN=https://login.obscuretone.com
+Environment=PYTHONDONTWRITEBYTECODE=1
+ExecStartPre=/opt/obscuretone-identity/.venv/bin/python -m identity init
+ExecStart=/opt/obscuretone-identity/.venv/bin/python -m identity serve --port 8799
+Restart=on-failure
+RestartSec=3
+UMask=0077
+MemoryAccounting=yes
+MemoryHigh=90M
+MemoryMax=120M
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectHome=yes
+ProtectSystem=strict
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+
+[Install]
+WantedBy=multi-user.target

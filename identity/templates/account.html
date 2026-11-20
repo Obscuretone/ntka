@@ -1,0 +1,14 @@
+{% extends "base.html" %}
+{% block title %}Account · {{ brand.name }}{% endblock %}
+{% block head %}<script src="/assets/passkeys.js" defer></script>{% endblock %}
+{% block content %}
+<main class="shell">
+  <header class="section-head"><h1>Account</h1><p>{{ person.email }}</p></header>
+  <section class="panel">
+    <h2>Passkeys</h2>
+    <p>{{ count }} registered {{ "passkey" if count == 1 else "passkeys" }}. Add a second device or hardware key for recovery.</p>
+    <button id="passkey" type="button" class="primary" data-mode="backup">Add a backup passkey</button>
+    <p class="feedback" id="passkey-status" role="status"></p>
+  </section>
+</main>
+{% endblock %}

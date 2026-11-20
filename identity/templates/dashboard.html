@@ -1,0 +1,26 @@
+{% extends "base.html" %}
+{% block title %}Your apps · {{ brand.name }}{% endblock %}
+{% block content %}
+<main class="shell">
+  <header class="section-head">
+    <h1>Your apps</h1>
+    <p>Signed in as {{ person.name }}</p>
+  </header>
+  {% if sites %}
+    <ul class="app-grid">
+      {% for site in sites %}
+        <li><a href="{{ site.launch }}" class="app-tile">
+          <span class="app-icon" aria-hidden="true">{{ site.name[:2]|upper }}</span>
+          <strong>{{ site.name }}</strong>
+        </a></li>
+      {% endfor %}
+    </ul>
+  {% else %}
+    <section class="panel empty">
+      <h2>No apps yet</h2>
+      {% if person.owner %}<a class="primary" href="/manage">Add a site</a>
+      {% else %}<p>Apps appear here once the owner grants you access.</p>{% endif %}
+    </section>
+  {% endif %}
+</main>
+{% endblock %}

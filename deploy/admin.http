@@ -1,0 +1,23 @@
+server {
+    listen 80;
+    listen [::]:80;
+    server_name login.obscuretone.com;
+    access_log off;
+    location ^~ /.well-known/acme-challenge/ {
+        root /var/www/obscuretone-identity-acme;
+        try_files $uri =404;
+    }
+    location / { return 308 https://login.obscuretone.com$request_uri; }
+}
+
+server {
+    listen 80;
+    listen [::]:80;
+    server_name admin.obscuretone.com;
+    access_log off;
+    location ^~ /.well-known/acme-challenge/ {
+        root /var/www/obscuretone-identity-acme;
+        try_files $uri =404;
+    }
+    location / { return 308 https://login.obscuretone.com/manage; }
+}

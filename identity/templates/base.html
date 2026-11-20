@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}{{ brand.name }}{% endblock %}</title>
+  {% if brand.logo is none %}
+  <link rel="icon" href="/favicon.ico" sizes="16x16 32x32 48x48">
+  <link rel="apple-touch-icon" href="/apple-touch-icon.png">
+  {% endif %}
+  <link rel="icon" href="{{ brand.logo_url }}" type="{{ brand.logo_type }}">
+  <link rel="stylesheet" href="/assets/portal.css">
+  {% block head %}{% endblock %}
+</head>
+<body>
+  <header class="bar">
+    <a class="brand" href="/" aria-label="{{ brand.name }} home">
+      <img src="{{ brand.logo_url }}" width="32" height="32" alt="">
+      <span>{{ brand.wordmark }}</span>
+    </a>
+    {% if person %}
+    <nav aria-label="Portal">
+      <a href="/">Apps</a>
+      {% if person.owner %}<a href="/manage">Administration</a>{% endif %}
+      <a href="/account">Account</a>
+      <form action="/sign-out" method="post"><button class="quiet">Sign out</button></form>
+    </nav>
+    {% endif %}
+  </header>
+  {% block content %}{% endblock %}
+</body>
+</html>

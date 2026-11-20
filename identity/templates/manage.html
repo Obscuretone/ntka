@@ -1,0 +1,112 @@
+{% extends "base.html" %}
+{% block title %}Administration · {{ brand.name }}{% endblock %}
+{% block content %}
+<main class="shell">
+  <header class="section-head">
+    <h1>Administration</h1>
+    <p>Invite people and manage their site access.</p>
+  </header>
+  {% if error %}<p class="panel feedback" role="alert">{{ error }}</p>{% endif %}
+  {% if setup %}
+  <section class="panel setup" aria-label="{{ setup[0] }}">
+    {% if notice %}<p role="status">{{ notice }}</p>{% endif %}
+    <label>{{ setup[0] }} <input readonly value="{{ setup[1] }}"></label>
+    {% if setup[0] == "Enrollment link" %}<p>Share privately with the intended guest. The link expires after 24 hours or one enrollment.</p>
+    {% elif setup[0] == "Recovery link" %}<p>Share privately with the intended guest. The link expires after 15 minutes or one enrollment.</p>
+    {% else %}<p>Store this secret before leaving the page.</p>{% endif %}
+  </section>
+  {% endif %}
+  <div class="forms">
+    <section class="panel">
+      <h2>Invite a guest</h2>
+      <form action="/manage" method="post" class="fields">
+        <input type="hidden" name="action" value="invite">
+        <label>Name<input name="name" autocomplete="off" maxlength="80" required></label>
+        <label>Email<input type="email" name="email" autocomplete="off" maxlength="254" required></label>
+        <button class="primary">Create invitation</button>
+      </form>
+    </section>
+    <section class="panel">
+      <h2>Add a site</h2>
+      <form action="/manage" method="post" class="fields">
+        <input type="hidden" name="action" value="create-site">
+        <label>Site name<input name="name" maxlength="80" required></label>
+        <label>Launch URL<input name="launch" type="url" placeholder="https://" maxlength="500" required></label>
+        <label>OIDC callback URL<input name="callback" type="url" placeholder="https://" maxlength="500" required></label>
+        <button class="primary">Register site</button>
+      </form>
+    </section>
+  </div>
+  <section class="panel">
+    <h2>Guests and access</h2>
+    {% for guest in guests %}
+    <article class="entry">
+      <h3>{{ guest.name }}{% if not guest.enabled %} <small>Disabled</small>{% endif %}</h3>
+      <p>{{ guest.email }}</p>
+      <form method="post" action="/manage" class="actions">
+        <input type="hidden" name="person" value="{{ guest.id }}">
+        {% if guest.enabled %}
+        {% if not guest.enrolled %}<button name="action" value="reinvite">New enrollment link</button>{% endif %}
+        <button name="action" value="cancel-invite">Revoke invitation</button>
+        <button name="action" value="disable-person">Disable guest</button>
+        {% else %}<button name="action" value="enable-person">Enable guest</button>{% endif %}
+      </form>
+      {% if guest.enabled and guest.enrolled %}
+      <details class="recovery">
+        <summary>Reset guest passkeys</summary>
+        <form method="post" action="/manage">
+          <input type="hidden" name="action" value="reset-passkeys">
+          <input type="hidden" name="person" value="{{ guest.id }}">
+          <label class="check"><input type="checkbox" name="confirm" value="yes" required>
+            Revoke all passkeys and active sign-ins for this guest.
+          </label>
+          <button>Reset and create a recovery link</button>
+        </form>
+      </details>
+      {% endif %}
+      <ul class="access-list">
+        {% for site in sites if site.enabled %}
+          {% set access = (guest.id, site.id) in grants %}
+          <li>
+            <span>{{ site.name }}</span>
+            <form action="/manage" method="post">
+              <input type="hidden" name="person" value="{{ guest.id }}">
+              <input type="hidden" name="site" value="{{ site.id }}">
+              <button name="action" value="{{ "revoke" if access else "grant" }}"
+                      aria-label="{{ "Revoke" if access else "Grant" }} {{ site.name }} for {{ guest.name }}">
+                {{ "Revoke access" if access else "Grant access" }}
+              </button>
+            </form>
+          </li>
+        {% endfor %}
+      </ul>
+    </article>
+    {% else %}<p>No guests yet.</p>{% endfor %}
+  </section>
+  <section class="panel">
+    <h2>Registered sites</h2>
+    {% for site in sites %}
+    <article class="entry">
+      <h3>{{ site.name }}{% if not site.enabled %} <small>Disabled</small>{% endif %}</h3>
+      <p>Client ID <code>{{ site.id }}</code></p>
+      <form action="/manage" method="post">
+        <input type="hidden" name="site" value="{{ site.id }}">
+        <button name="action" value="{{ "disable-site" if site.enabled else "enable-site" }}">
+          {{ "Disable site" if site.enabled else "Enable site" }}
+        </button>
+      </form>
+    </article>
+    {% else %}<p>No sites registered.</p>{% endfor %}
+  </section>
+  {% if audit %}
+  <section class="panel">
+    <h2>Recent changes</h2>
+    <ul class="audit">
+      {% for event in audit %}
+      <li><span>{{ event.event }} · {{ event.detail }}</span><time datetime="{{ event.date|replace(' ', 'T') }}Z">{{ event.date }} UTC</time></li>
+      {% endfor %}
+    </ul>
+  </section>
+  {% endif %}
+</main>
+{% endblock %}

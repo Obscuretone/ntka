@@ -1,0 +1,12 @@
+.venv/
+__pycache__/
+*.pyc
+/instance/
+.env
+*.env
+*.sqlite*
+*.db
+*.db-wal
+*.db-shm
+*.pem
+*.key

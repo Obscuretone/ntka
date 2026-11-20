@@ -1,0 +1,27 @@
+{% extends "base.html" %}
+{% block title %}{{ "Enroll a passkey" if mode == "invite" else "Sign in" }} · {{ brand.name }}{% endblock %}
+{% block head %}<script src="/assets/passkeys.js" defer></script>{% endblock %}
+{% block content %}
+<main class="gate">
+  <img class="gate-photo" src="/assets/piano-gallery.webp" alt=""
+       width="1050" height="700" fetchpriority="high">
+  <section aria-labelledby="gate-title">
+    {% if mode == "invite" %}
+      <h1 id="gate-title">Set up your passkey</h1>
+      <p>Use the device or security key you want to sign in with.</p>
+    {% elif mode == "verify" %}
+      <h1 id="gate-title">Verify your passkey</h1>
+      <p>Sign in again to make changes in Administration.</p>
+    {% else %}
+      <h1 id="gate-title">Sign in to {{ brand.name }}</h1>
+      <p>{{ "Your passkey is ready. Use it to sign in." if enrolled else "Use your passkey to open the apps you have access to." }}</p>
+    {% endif %}
+    <button type="button" class="primary" id="passkey" data-mode="{{ 'login' if mode == 'verify' else mode }}"
+            data-target="{{ target }}">
+      {{ "Create a passkey" if mode == "invite" else "Sign in with a passkey" }}
+    </button>
+    <p class="feedback" id="passkey-status" role="status"></p>
+    <noscript><p>Enable JavaScript to use your passkey.</p></noscript>
+  </section>
+</main>
+{% endblock %}
