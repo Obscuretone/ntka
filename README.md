@@ -2,6 +2,10 @@
 
 A self-hosted Sanic identity provider for a single owner and invited guests. Passkeys belong to individual accounts. A guest sees and can sign in to only the sites the owner grants them. Obscuretone Identity is the first deployment.
 
+![NTKA app launcher showing the sites available to a demo guest](docs/images/app-launcher.png)
+
+The screenshot shows a demo guest account with fictional site grants. See how NTKA fits into the [self-hosted stack](https://obscuretone.com/posts/en/self_hosted_tools).
+
 ## Run locally or behind an HTTPS proxy
 
 Use Python 3.11 or newer, SQLite 3.35 or newer, and a trusted HTTPS origin. Set the reverse proxy to pass your configured host, forward to loopback, and leave authorization and token URLs out of access logs.
