@@ -5,7 +5,7 @@ import secrets
 import sqlite3
 from hmac import compare_digest
 from pathlib import Path
-from urllib.parse import urlencode, urlsplit
+from urllib.parse import parse_qs, urlencode, urlsplit
 from uuid import UUID, uuid4
 
 from authlib.oauth2 import OAuth2Error
@@ -26,6 +26,7 @@ from webauthn.helpers.structs import (
 
 from .branding import Brand
 from .oidc import CLIENT_AUTH, SCOPES, Server, user_info
+from .passwords import register_passwords
 from .storage import Store, can_access, digest, issue_invite, log, now, reset_passkeys
 
 
@@ -34,6 +35,8 @@ SESSION_COOKIE = "obscuretone_session"
 FLOW_COOKIE = "obscuretone_flow"
 SESSION_SECONDS = 3600
 FLOW_SECONDS = 300
+OKTA = "/oauth2/v1"
+OIDC_POST = {"/token", "/authorize", "/userinfo", OKTA + "/token", OKTA + "/authorize", OKTA + "/userinfo"}
 UV = UserVerificationRequirement.REQUIRED
 AUTHORIZATION_PARAMS = frozenset({
     "client_id", "redirect_uri", "response_type", "response_mode", "scope", "state", "nonce",
@@ -60,7 +63,7 @@ def set_cookie(result, key, value, seconds):
 def local_target(value):
     if value == "/manage":
         return value
-    if isinstance(value, str) and value.startswith("/authorize?") and len(value) <= 4096:
+    if isinstance(value, str) and value.startswith(("/authorize?", OKTA + "/authorize?")) and len(value) <= 4096:
         if not re.search(r"[\\\x00-\x20\x7f]", value):
             return value
     return "/"
@@ -113,11 +116,12 @@ def new_session(db, result, person, previous, fresh_for):
 
 
 def create_app(origin=None, directory=None):
-    origin = origin or os.environ.get("IDENTITY_ORIGIN", "https://login.obscuretone.com")
+    origin = origin or os.environ.get("IDENTITY_ORIGIN", "")
     if not valid_https(origin) or origin != "https://" + urlsplit(origin).netloc:
         raise ValueError("IDENTITY_ORIGIN must be an HTTPS origin with no path.")
     host = urlsplit(origin).netloc
     rp_id = urlsplit(origin).hostname
+    okta_metadata = os.environ.get("IDENTITY_OKTA_ENDPOINTS") == "1"
     store = Store(directory or os.environ.get("IDENTITY_DATA", "instance"))
     key = store.signing_key()
     brand = Brand.from_environment()
@@ -125,29 +129,71 @@ def create_app(origin=None, directory=None):
     app.config.REQUEST_MAX_SIZE = 64 * 1024
     app.config.ACCESS_LOG = False
     app.static("/assets", FILES / "assets", name="assets")
-    if brand.logo is None:
-        app.static("/favicon.ico", FILES / "assets" / "favicon.ico", name="favicon")
-        app.static("/apple-touch-icon.png", FILES / "assets" / "apple-touch-icon.png", name="touch_icon")
-    else:
+    def image_asset(data, content_type):
+        return response.raw(data, content_type=content_type, headers={
+            "Content-Security-Policy": "sandbox; default-src 'none'; "
+                                       "style-src 'unsafe-inline'; frame-ancestors 'none'",
+        })
+
+    if brand.logo is not None:
         @app.get("/brand/logo", strict_slashes=True)
         async def custom_logo(request):
-            return response.raw(brand.logo, content_type=brand.logo_type, headers={
-                "Content-Security-Policy": "sandbox; default-src 'none'; "
-                                           "style-src 'unsafe-inline'; frame-ancestors 'none'",
-            })
+            return image_asset(brand.logo, brand.logo_type)
 
         @app.get("/favicon.ico")
         async def custom_favicon(request):
             return response.redirect(brand.logo_url)
 
+    if brand.hero is not None:
+        @app.get("/brand/hero")
+        async def custom_hero(request):
+            return image_asset(brand.hero, brand.hero_type)
+
+    if brand.css is not None:
+        @app.get("/brand/site.css")
+        async def custom_css(request):
+            return response.raw(brand.css, content_type="text/css")
+
+    def site_css(client_id):
+        if not brand.site_styles or not re.fullmatch(r"[A-Za-z0-9_-]{1,100}", client_id):
+            return None
+        file = brand.site_styles / (client_id + ".css")
+        if not file.is_file() or file.is_symlink():
+            return None
+        return file
+
+    if brand.site_styles:
+        @app.get("/brand/sites/<stylesheet>")
+        async def client_css(request, stylesheet):
+            file = site_css(stylesheet.removesuffix(".css")) if stylesheet.endswith(".css") else None
+            if file is None:
+                return response.empty(status=404)
+            with file.open("rb") as stylesheet:
+                data = stylesheet.read(128 * 1024 + 1)
+            return (response.raw(data, content_type="text/css") if len(data) <= 128 * 1024
+                    else response.empty(status=404))
+
     def page(name, **context):
-        return response.html(TEMPLATES.get_template(name + ".html").render(brand=brand, **context))
+        target = context.get("target", "")
+        query = parse_qs(urlsplit(target).query)
+        client_id = query.get("client_id", [""])[0]
+        style = f"/brand/sites/{client_id}.css" if site_css(client_id) else None
+        return response.html(TEMPLATES.get_template(name + ".html").render(
+            brand=brand, site_style=style, passwords_enabled=passwords_enabled, **context,
+        ))
+
+    def start_password_session(db, request, person, target):
+        result = response.redirect(target, status=303)
+        new_session(db, result, person, cookie_value(request, SESSION_COOKIE), digest(target))
+        return result
+
+    passwords_enabled = register_passwords(app, store, page, local_target, start_password_session)
 
     @app.on_request
     async def guard(request):
         if request.headers.get("host") != host:
             return problem("Invalid host.", 400)
-        if request.method == "POST" and request.path not in {"/token", "/authorize", "/userinfo"}:
+        if request.method == "POST" and request.path not in OIDC_POST:
             if request.headers.get("origin") != origin:
                 return problem("Invalid request origin.", 403)
         request.ctx.session = None
@@ -162,9 +208,9 @@ def create_app(origin=None, directory=None):
             "Content-Security-Policy", "default-src 'none'; script-src 'self'; style-src 'self'; "
             "connect-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'; img-src 'self'",
         )
+        result.headers.setdefault("Referrer-Policy", "no-referrer")
         result.headers.update({
             "Cache-Control": "no-store",
-            "Referrer-Policy": "no-referrer",
             "X-Content-Type-Options": "nosniff",
             "X-Robots-Tag": "noindex, nofollow",
             "Strict-Transport-Security": "max-age=31536000",
@@ -317,10 +363,11 @@ def create_app(origin=None, directory=None):
 
     @app.get("/.well-known/openid-configuration")
     async def discovery(request):
+        endpoint_root = origin + (OKTA if okta_metadata else "")
         return response.json({
-            "issuer": origin, "authorization_endpoint": origin + "/authorize",
-            "token_endpoint": origin + "/token", "userinfo_endpoint": origin + "/userinfo",
-            "jwks_uri": origin + "/jwks.json",
+            "issuer": origin, "authorization_endpoint": endpoint_root + "/authorize",
+            "token_endpoint": endpoint_root + "/token", "userinfo_endpoint": endpoint_root + "/userinfo",
+            "jwks_uri": endpoint_root + ("/keys" if okta_metadata else "/jwks.json"),
             "response_types_supported": ["code"], "response_modes_supported": ["query"],
             "grant_types_supported": ["authorization_code"], "subject_types_supported": ["public"],
             "id_token_signing_alg_values_supported": ["RS256"],
@@ -332,22 +379,25 @@ def create_app(origin=None, directory=None):
                                  "at_hash", "name", "email", "email_verified"],
         })
 
+    @app.get(OKTA + "/keys", name="okta_jwks")
     @app.get("/jwks.json")
     async def jwks(request):
         return response.json({"keys": [key.as_dict(kid=key.thumbprint(), use="sig", alg="RS256")]})
 
+    @app.post(OKTA + "/authorize", name="okta_authorize_form")
     @app.post("/authorize")
     async def authorize_form(request):
         if (request.content_type != "application/x-www-form-urlencoded" or request.query_string
                 or any(len(request.form.getlist(field)) != 1 for field in request.form)):
             return problem("Expected a form-encoded authorization request.")
         params = {field: request.form.get(field) for field in request.form if field in AUTHORIZATION_PARAMS}
-        target = local_target("/authorize?" + urlencode(params))
+        target = local_target(request.path + "?" + urlencode(params))
         return response.redirect(target, status=303) if target != "/" else problem("Invalid authorization request.")
 
+    @app.get(OKTA + "/authorize", name="okta_authorize")
     @app.get("/authorize")
     async def authorize(request):
-        target = local_target("/authorize?" + request.query_string)
+        target = local_target(request.path + "?" + request.query_string)
         if target == "/":
             return problem("Invalid authorization request.")
         snapshot = request.ctx.session
@@ -387,6 +437,7 @@ def create_app(origin=None, directory=None):
                 error.state = request.args.get("state")
                 return issuer.handle_error_response(request, error)
 
+    @app.post(OKTA + "/token", name="okta_token")
     @app.post("/token")
     async def token(request):
         if request.content_type != "application/x-www-form-urlencoded" or request.query_string:
@@ -404,6 +455,7 @@ def create_app(origin=None, directory=None):
             except OAuth2Error as error:
                 return issuer.handle_error_response(request, error)
 
+    @app.route(OKTA + "/userinfo", methods=["GET", "POST"], name="okta_userinfo")
     @app.route("/userinfo", methods=["GET", "POST"])
     async def userinfo(request):
         bearer = re.fullmatch(r"Bearer ([A-Za-z0-9_-]{43})", request.headers.get("authorization", ""), re.I)

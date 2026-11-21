@@ -1,6 +1,6 @@
 # ntka
 
-A self-hosted Sanic identity provider for a single owner and invited guests. Passkeys belong to individual accounts. A guest sees and can sign in to only the sites the owner grants them. Obscuretone Identity is the first deployment.
+A self-hosted Sanic identity provider for a single owner and individually granted guests. Passkeys belong to individual accounts. A guest sees and can sign in to only the sites the owner grants them. Obscuretone Identity is the first deployment.
 
 ![NTKA app launcher showing the sites available to a demo guest](docs/images/app-launcher.png)
 
@@ -27,7 +27,13 @@ The included updater handles code-only changes when the installed dependencies a
 
 ## Branding
 
-Set `IDENTITY_NAME` for page titles and the WebAuthn display name. Set `IDENTITY_WORDMARK` for the text in the header. Set `IDENTITY_LOGO_FILE` to the absolute path of a service-readable SVG, PNG, WebP, or ICO file up to 512 KiB. An uploaded logo file is used in the header and as the browser favicon. Restart the service after changing branding. The configured issuer hostname and passkey relying-party ID are independent of these display settings.
+Set `IDENTITY_NAME` for page titles and the WebAuthn display name. Set `IDENTITY_WORDMARK` for the text in the header. Set `IDENTITY_LOGO_FILE` to the absolute path of a service-readable SVG, PNG, WebP, or ICO file up to 512 KiB. An uploaded logo file is used in the header and as the browser favicon. Set `IDENTITY_HERO_FILE` to an optional local image for sign-in pages.
+Set `IDENTITY_CSS_FILE` to a site-wide stylesheet. For OIDC client themes,
+set `IDENTITY_SITE_CSS_DIR` and name each stylesheet `<client-id>.css`.
+For example, use `work-portal.css` for a client with ID `work-portal`.
+Client CSS loads after the main stylesheet and site theme. Keep public CSS
+and images free of embedded secrets. Restart the service after changing the
+site-wide branding configuration. The configured issuer hostname and passkey relying-party ID are independent of these display settings.
 
 ## Enroll the owner and invite guests
 
@@ -45,13 +51,37 @@ Owner recovery requires local server access. This command revokes the previous p
 .venv/bin/python -m identity recover --email owner@example.com --revoke-all-passkeys
 ```
 
+## Email and password signup
+
+Enable guest signup by setting `IDENTITY_SENDMAIL` to the absolute path of a
+sendmail-compatible executable and `IDENTITY_MAIL_FROM` to an authorized
+sender address. The executable receives a plain-text verification email with
+`-i -t`. Use a local mail transfer agent or any compatible transport, including
+a configured Nailgun broker. To send through the Mailgun API instead, set
+`IDENTITY_MAILGUN_URL` (an API origin such as `https://api.mailgun.net`),
+`IDENTITY_MAILGUN_DOMAIN`, and `IDENTITY_MAILGUN_KEY_FILE` to a private file
+containing the domain sending key, along with `IDENTITY_MAIL_FROM`. Set `IDENTITY_SIGNUP_DAILY_LIMIT` to bound
+verification messages across all accounts (default 30 per rolling day).
+
+Users verify their email before setting a password and receive no site grants
+until the owner assigns them. Existing passkey accounts keep their credentials.
+The owner continues to use a passkey.
+
 ## Connect a site
 
 1. Register the site in **Administration** with its HTTPS launch URL and the exact OIDC callback URL documented by the site or its authentication proxy.
 2. Configure the site using the issuer, the ID and one-time client secret shown at creation, and scopes `openid profile email` as needed. Enable Authorization Code flow with S256 PKCE and `client_secret_basic` or `client_secret_post`.
 3. Grant access individually and test both an allowed and an unassigned account against the direct site URL.
 
-The supported discovery endpoint is `/.well-known/openid-configuration`. Set relying-party policy using the immutable `sub` claim. The owner enters account email addresses and the provider reports `email_verified: false`.
+The supported discovery endpoint is `/.well-known/openid-configuration`. Set relying-party policy using the immutable `sub` claim. Accounts created
+through email verification have `email_verified: true`.
+
+Okta-style org authorization server OIDC paths are available at
+`/oauth2/v1/authorize`, `/oauth2/v1/token`, `/oauth2/v1/userinfo`, and
+`/oauth2/v1/keys` for the authorization code flow above. Set
+`IDENTITY_OKTA_ENDPOINTS=1` to advertise those endpoints in discovery.
+The issuer remains the configured root HTTPS origin. Existing clients can use
+the original OIDC paths.
 
 Revoking a grant invalidates provider-side codes and opaque access tokens immediately. Relying parties control their own issued browser sessions and can keep them until their configured expiry. Plan their session lifetime and termination behavior accordingly. The current profile uses confidential clients, RS256 ID tokens, five-minute access tokens, and no refresh grant or federated logout.
 

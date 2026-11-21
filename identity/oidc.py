@@ -25,7 +25,7 @@ def user_info(user, scope):
     if "profile" in scope.split():
         claims["name"] = user["name"]
     if "email" in scope.split():
-        claims.update(email=user["email"], email_verified=False)
+        claims.update(email=user["email"], email_verified=bool(user["email_verified"]))
     return claims
 
 

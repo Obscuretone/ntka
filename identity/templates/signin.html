@@ -2,9 +2,8 @@
 {% block title %}{{ "Enroll a passkey" if mode == "invite" else "Sign in" }} · {{ brand.name }}{% endblock %}
 {% block head %}<script src="/assets/passkeys.js" defer></script>{% endblock %}
 {% block content %}
-<main class="gate">
-  <img class="gate-photo" src="/assets/piano-gallery.webp" alt=""
-       width="1050" height="700" fetchpriority="high">
+<main class="gate{{ ' gate-with-hero' if brand.hero else '' }}">
+  {% if brand.hero %}<img class="gate-photo" src="/brand/hero" alt="" width="1050" height="700">{% endif %}
   <section aria-labelledby="gate-title">
     {% if mode == "invite" %}
       <h1 id="gate-title">Set up your passkey</h1>
@@ -21,6 +20,10 @@
       {{ "Create a passkey" if mode == "invite" else "Sign in with a passkey" }}
     </button>
     <p class="feedback" id="passkey-status" role="status"></p>
+    {% if passwords_enabled and mode == "login" and target != "/manage" %}
+    <p class="password-actions"><a href="/password/sign-in?next={{ target|urlencode }}">Sign in with email</a>
+      <a href="/password/signup?next={{ target|urlencode }}">Create an account</a></p>
+    {% endif %}
     <noscript><p>Enable JavaScript to use your passkey.</p></noscript>
   </section>
 </main>

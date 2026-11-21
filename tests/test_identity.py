@@ -110,11 +110,18 @@ class IdentityTest(unittest.IsolatedAsyncioTestCase):
         logo = Path(self.directory.name) / "logo.svg"
         contents = b'<svg xmlns="http://www.w3.org/2000/svg"/>'
         logo.write_bytes(contents)
+        styles = Path(self.directory.name) / "site-styles"
+        styles.mkdir()
+        (styles / "guest-site.css").write_text(".gate { color: green; }")
+        theme = styles / "theme.css"
+        theme.write_text(":root { --accent: blue; }")
         Sanic.unregister_app(self.app)
         with patch.dict(os.environ, {
             "IDENTITY_NAME": "Studio <Identity>",
             "IDENTITY_WORDMARK": "<studio>",
             "IDENTITY_LOGO_FILE": str(logo),
+            "IDENTITY_CSS_FILE": str(theme),
+            "IDENTITY_SITE_CSS_DIR": str(styles),
         }):
             app = create_app(ORIGIN, self.directory.name)
         self.addCleanup(Sanic.unregister_app, app)
@@ -123,6 +130,11 @@ class IdentityTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Studio &lt;Identity&gt;", home.text)
         self.assertIn("&lt;studio&gt;", home.text)
         self.assertIn('rel="icon" href="/brand/logo"', home.text)
+        self.assertIn('href="/brand/site.css"', home.text)
+        css = await self.call_api("get", "/brand/sites/guest-site.css")
+        self.assertEqual(css.text, ".gate { color: green; }")
+        self.assertTrue(css.headers["content-type"].startswith("text/css"))
+        self.assertEqual((await self.call_api("get", "/brand/sites/unknown.css")).status_code, 404)
         image = await self.call_api("get", "/brand/logo")
         self.assertEqual(image.content, contents)
         self.assertEqual(image.headers["content-type"], "image/svg+xml")

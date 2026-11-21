@@ -1,12 +1,13 @@
 import argparse
 import os
+from urllib.parse import urlsplit
 
-from .app import create_app, valid_email
+from .app import create_app, valid_email, valid_https
 from .storage import Store
 
 
 def main():
-    parser = argparse.ArgumentParser(description="ntka · passkey identity provider")
+    parser = argparse.ArgumentParser(description="ntka · OpenID Connect identity provider")
     commands = parser.add_subparsers(dest="command", required=True)
     commands.add_parser("init")
     owner = commands.add_parser("owner-invite")
@@ -23,6 +24,9 @@ def main():
     if args.command == "init":
         store.initialize()
     elif args.command in {"owner-invite", "recover"}:
+        origin = os.environ.get("IDENTITY_ORIGIN", "")
+        if not valid_https(origin) or origin != "https://" + urlsplit(origin).netloc:
+            parser.error("Set IDENTITY_ORIGIN to the exact HTTPS issuer origin.")
         if not valid_email(args.email):
             parser.error("Enter a valid account email.")
         try:
@@ -34,7 +38,6 @@ def main():
                 token = store.owner_invite(args.name.strip(), args.email)
         except ValueError as error:
             parser.error(str(error))
-        origin = os.environ.get("IDENTITY_ORIGIN", "https://login.obscuretone.com")
         print(origin + "/enroll#" + token)
     else:
         create_app().run(host="127.0.0.1", port=args.port, single_process=True, access_log=False)

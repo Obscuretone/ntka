@@ -15,9 +15,18 @@ SCHEMA = """
 CREATE TABLE IF NOT EXISTS people (
     id TEXT PRIMARY KEY, name TEXT NOT NULL, email TEXT NOT NULL COLLATE NOCASE UNIQUE,
     owner INTEGER NOT NULL DEFAULT 0, enabled INTEGER NOT NULL DEFAULT 1,
-    enrolled INTEGER NOT NULL DEFAULT 0
+    enrolled INTEGER NOT NULL DEFAULT 0, email_verified INTEGER NOT NULL DEFAULT 0
 );
 CREATE UNIQUE INDEX IF NOT EXISTS single_owner ON people(owner) WHERE owner = 1;
+CREATE TABLE IF NOT EXISTS passwords (
+    person TEXT PRIMARY KEY REFERENCES people(id), salt BLOB NOT NULL, hash BLOB NOT NULL
+);
+CREATE TABLE IF NOT EXISTS password_signup (
+    token TEXT PRIMARY KEY, email TEXT NOT NULL, expires INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS password_attempts (
+    action TEXT NOT NULL, email TEXT NOT NULL, expires INTEGER NOT NULL
+);
 CREATE TABLE IF NOT EXISTS passkeys (
     id BLOB PRIMARY KEY, person TEXT NOT NULL REFERENCES people(id),
     public_key BLOB NOT NULL, sign_count INTEGER NOT NULL, label TEXT NOT NULL,
@@ -111,7 +120,10 @@ class Store:
             db.execute("PRAGMA journal_mode=WAL")
             db.executescript(SCHEMA)
         with self.connect(write=True) as db:
-            if "enrolled" not in {row["name"] for row in db.execute("PRAGMA table_info(people)")}:
+            person_columns = {row["name"] for row in db.execute("PRAGMA table_info(people)")}
+            if "email_verified" not in person_columns:
+                db.execute("ALTER TABLE people ADD COLUMN email_verified INTEGER NOT NULL DEFAULT 0")
+            if "enrolled" not in person_columns:
                 db.execute("ALTER TABLE people ADD COLUMN enrolled INTEGER NOT NULL DEFAULT 0")
                 db.execute("UPDATE people SET enrolled=1 WHERE id IN (SELECT person FROM passkeys)")
             if "code" not in {row["name"] for row in db.execute("PRAGMA table_info(tokens)")}:
