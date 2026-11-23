@@ -13,6 +13,7 @@
     <label>{{ setup[0] }} <input readonly value="{{ setup[1] }}"></label>
     {% if setup[0] == "Enrollment link" %}<p>Share privately with the intended guest. The link expires after 24 hours or one enrollment.</p>
     {% elif setup[0] == "Recovery link" %}<p>Share privately with the intended guest. The link expires after 15 minutes or one enrollment.</p>
+    {% elif setup[0] == "Site sign-up link" %}<p>Share this link only with people who should be able to sign in to the registered site.</p>
     {% else %}<p>Store this secret before leaving the page.</p>{% endif %}
   </section>
   {% endif %}
@@ -95,6 +96,20 @@
           {{ "Disable site" if site.enabled else "Enable site" }}
         </button>
       </form>
+      {% if site.enabled %}
+      <form action="/manage" method="post" class="fields">
+        <input type="hidden" name="site" value="{{ site.id }}">
+        <label>Maximum sign-ups<input type="number" name="uses" min="1" max="100" value="20" required></label>
+        <label>Hours until expiry<input type="number" name="hours" min="1" max="168" value="168" required></label>
+        <button name="action" value="create-signup">{{ "Replace sign-up link" if site.id in signup_links else "Create sign-up link" }}</button>
+      </form>
+      {% if site.id in signup_links %}
+      <form action="/manage" method="post">
+        <input type="hidden" name="site" value="{{ site.id }}">
+        <button name="action" value="cancel-signup">Revoke sign-up link</button>
+      </form>
+      {% endif %}
+      {% endif %}
     </article>
     {% else %}<p>No sites registered.</p>{% endfor %}
   </section>

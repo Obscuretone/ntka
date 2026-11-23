@@ -8,7 +8,7 @@
     {% if mode == "signup" %}
       <h1 id="gate-title">Create an account</h1>
       <p>Set up a passkey for the site that shared this link.</p>
-      <form id="signup-fields" class="fields">
+      <form id="signup-fields" class="fields" method="post">
         <label>Name <input name="name" autocomplete="name" required maxlength="80"></label>
         <label>Email <input name="email" type="email" autocomplete="email" required maxlength="254"></label>
       </form>
@@ -22,7 +22,8 @@
       <h1 id="gate-title">Sign in to {{ brand.name }}</h1>
       <p>{{ "Your passkey is ready. Use it to sign in." if enrolled else "Use your passkey to open the apps you have access to." }}</p>
     {% endif %}
-    <button type="button" class="primary" id="passkey" data-mode="{{ 'login' if mode == 'verify' else mode }}"
+    <button {% if mode == "signup" %}type="submit" form="signup-fields"{% else %}type="button"{% endif %}
+            class="primary" id="passkey" data-mode="{{ 'login' if mode == 'verify' else mode }}"
             data-target="{{ target }}">
       {{ "Create a passkey" if mode in ["invite", "signup"] else "Sign in with a passkey" }}
     </button>

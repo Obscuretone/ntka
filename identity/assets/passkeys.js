@@ -1,10 +1,12 @@
 const button = document.querySelector("#passkey");
 const feedback = document.querySelector("#passkey-status");
-const invite = button?.dataset.mode === "invite" ? location.hash.slice(1) : "";
+const signupForm = document.querySelector("#signup-fields");
+const needsInvitation = ["invite", "signup"].includes(button?.dataset.mode);
+const invite = needsInvitation ? location.hash.slice(1) : "";
 
 if (invite) {
   history.replaceState(null, "", location.pathname);
-} else if (button?.dataset.mode === "invite") {
+} else if (needsInvitation) {
   button.disabled = true;
   feedback.textContent = "Reopen the original enrollment link to continue.";
 }
@@ -63,7 +65,9 @@ async function post(path, body) {
   return result;
 }
 
-button?.addEventListener("click", async () => {
+async function usePasskey(event) {
+  event.preventDefault();
+  if (button.disabled) return;
   if (!window.PublicKeyCredential) {
     feedback.textContent = "This browser cannot use passkeys here. Open the portal over HTTPS.";
     return;
@@ -73,7 +77,13 @@ button?.addEventListener("click", async () => {
   const mode = button.dataset.mode;
   const create = mode !== "login";
   try {
-    const { options } = await post(`/passkeys/${mode}/begin`, { invite, target: button.dataset.target });
+    const request = { invite, target: button.dataset.target };
+    if (signupForm) {
+      const fields = new FormData(signupForm);
+      request.name = fields.get("name");
+      request.email = fields.get("email");
+    }
+    const { options } = await post(`/passkeys/${mode}/begin`, request);
     const publicKey = browserOptions(options, create);
     const credential = await (create
       ? navigator.credentials.create({ publicKey })
@@ -86,4 +96,7 @@ button?.addEventListener("click", async () => {
       : error.message;
     button.disabled = false;
   }
-});
+}
+
+if (signupForm) signupForm.addEventListener("submit", usePasskey);
+else button?.addEventListener("click", usePasskey);

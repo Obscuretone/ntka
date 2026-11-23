@@ -279,6 +279,41 @@ class IdentityTest(unittest.IsolatedAsyncioTestCase):
         new_guest = await self.enroll(replacement)
         await self.login(new_guest)
 
+    async def test_site_signup_enrolls_only_for_the_linked_site(self):
+        owner = await self.enroll(self.store.owner_invite("Owner", "owner@example.com"))
+        await self.login(owner)
+        site_ids = []
+        for name, url in (("Site A", SITE_A), ("Site B", SITE_B)):
+            site = await self.call_api("post", "/manage", data={
+                "action": "create-site", "name": name, "launch": url, "callback": url + "/callback",
+            })
+            site_ids.append(re.search(r"Site created\. Client ID ([A-Za-z0-9_-]{24})", site.text)[1])
+        self.assertIn('value="create-signup"', site.text)
+        issued = await self.call_api("post", "/manage", data={
+            "action": "create-signup", "site": site_ids[0], "uses": "1", "hours": "1",
+        })
+        self.assertIn('value="cancel-signup"', issued.text)
+        invite = re.search(r"/join#([A-Za-z0-9_-]{43})", issued.text)[1]
+        await self.call_api("post", "/sign-out")
+        join = await self.call_api("get", "/join")
+        self.assertIn('type="submit" form="signup-fields"', join.text)
+
+        payload = {"invite": invite, "name": "Guest", "email": "guest@example.com"}
+        begin = await self.call_api("post", "/passkeys/signup/begin", json=payload)
+        self.assertEqual(begin.status_code, 200, begin.text)
+        guest = VirtualPasskey()
+        finish = await self.call_api("post", "/passkeys/signup/finish", json={
+            "credential": guest.credential(begin.json["options"], enrollment=True),
+        })
+        self.assertEqual(finish.status_code, 200, finish.text)
+        with self.store.connect() as db:
+            grants = db.execute("SELECT site FROM grants").fetchall()
+            self.assertEqual([record["site"] for record in grants], site_ids[:1])
+        exhausted = await self.call_api("post", "/passkeys/signup/begin", json={
+            **payload, "email": "another@example.com",
+        })
+        self.assertEqual(exhausted.status_code, 403)
+
     @unittest.skipUnless(os.environ.get("NTKA_TEST_MARIADB_FRESH"), "requires a separate empty MariaDB fixture database")
     async def test_fresh_mariadb_initialization_does_not_create_sqlite(self):
         from identity.mariadb_store import MariaDBStore
