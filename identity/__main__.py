@@ -3,13 +3,15 @@ import os
 from urllib.parse import urlsplit
 
 from .app import create_app, valid_email, valid_https
-from .storage import Store
+from .storage import store_from_environment
 
 
 def main():
     parser = argparse.ArgumentParser(description="ntka · OpenID Connect identity provider")
     commands = parser.add_subparsers(dest="command", required=True)
     commands.add_parser("init")
+    migrate = commands.add_parser("migrate-mariadb")
+    migrate.add_argument("--source", required=True, help="Directory with a consistent SQLite backup and its signing key")
     owner = commands.add_parser("owner-invite")
     owner.add_argument("--name", required=True)
     owner.add_argument("--email", required=True)
@@ -20,9 +22,21 @@ def main():
     serve.add_argument("--port", type=int, default=8799)
     args = parser.parse_args()
     os.umask(0o077)
-    store = Store(os.environ.get("IDENTITY_DATA", "instance"))
+    store = store_from_environment()
     if args.command == "init":
         store.initialize()
+    elif args.command == "migrate-mariadb":
+        from .migrate_mariadb import migrate_sqlite
+        from .mariadb_store import MariaDBStore
+
+        if not isinstance(store, MariaDBStore):
+            parser.error("Set IDENTITY_STORAGE=mariadb and configure a dedicated empty target database.")
+        try:
+            counts = migrate_sqlite(args.source, store)
+        except ValueError as error:
+            parser.error(str(error))
+        for table, count in counts.items():
+            print(f"{table}: {count} rows verified")
     elif args.command in {"owner-invite", "recover"}:
         origin = os.environ.get("IDENTITY_ORIGIN", "")
         if not valid_https(origin) or origin != "https://" + urlsplit(origin).netloc:

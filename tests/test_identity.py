@@ -20,7 +20,7 @@ from sanic import Sanic
 from sanic_testing.testing import SanicASGITestClient
 
 from identity.app import create_app
-from identity.storage import Store
+from identity.storage import Store, digest, now, person_by_email
 
 
 ORIGIN = "https://admin.example.com"
@@ -278,6 +278,72 @@ class IdentityTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(old.status_code, 403)
         new_guest = await self.enroll(replacement)
         await self.login(new_guest)
+
+    @unittest.skipUnless(os.environ.get("NTKA_TEST_MARIADB"), "requires an empty MariaDB fixture database")
+    async def test_sqlite_migration_preserves_identity_and_session(self):
+        from identity.mariadb_store import MariaDBStore
+        from identity.migrate_mariadb import migrate_sqlite
+
+        owner = await self.enroll(self.store.owner_invite("Owner", "OWNER@example.com"))
+        await self.login(owner)
+        cookie = self.client.cookies["__Host-obscuretone_session"]
+        keys = (await self.call_api("get", "/jwks.json")).json
+        with self.store.connect(write=True) as db:
+            person = person_by_email(db, "owner@example.com")["id"]
+            db.execute("INSERT INTO people (id, name, email) VALUES (?, ?, ?)",
+                       ("guest-1", "Guest", "É@example.com"))
+            db.execute("INSERT INTO people (id, name, email) VALUES (?, ?, ?)",
+                       ("guest-2", "Guest", "é@example.com"))
+            db.execute("INSERT INTO sites (id, name, launch, callback, secret) VALUES (?, ?, ?, ?, ?)",
+                       ("x" * 256, "Import failure fixture", SITE_A, SITE_A + "/callback", "fixture"))
+        target_directory = Path(self.directory.name) / "mariadb"
+        wrong_key = Store(target_directory)
+        wrong_key.initialize()
+        target = MariaDBStore.from_environment(target_directory)
+        with self.assertRaisesRegex(ValueError, "original signing key"):
+            migrate_sqlite(self.directory.name, target)
+        target.keyfile.write_bytes(self.store.keyfile.read_bytes())
+        with self.assertRaisesRegex(ValueError, "could not import or verify sites"):
+            migrate_sqlite(self.directory.name, target)
+        with target.raw_connection() as connection, connection.cursor() as cursor:
+            cursor.execute("SELECT COUNT(*) AS total FROM people")
+            self.assertEqual(cursor.fetchone()["total"], 0)
+            cursor.execute("SELECT signing_fingerprint FROM identity_storage WHERE id=1")
+            self.assertIsNone(cursor.fetchone()["signing_fingerprint"])
+
+        with self.store.connect(write=True) as db:
+            db.execute("UPDATE sites SET id=?", ("site-fixture",))
+            db.execute("INSERT INTO grants VALUES (?, ?)", ("guest-1", "site-fixture"))
+            db.execute("INSERT INTO ceremonies VALUES (?, ?, ?, ?, ?)",
+                       ("ceremony-fixture", bytes(range(32)), "signup", "/", now() + 300))
+            db.execute("INSERT INTO pending_signups VALUES (?, ?, ?, ?, ?)",
+                       ("ceremony-fixture", "signup-fixture", "new-person", "Pending", "pending@example.com"))
+        counts = migrate_sqlite(self.directory.name, target)
+        self.assertEqual(counts["passkeys"], 1)
+        self.assertEqual(counts["sessions"], 1)
+        self.assertEqual(counts["pending_signups"], 1)
+        with self.assertRaisesRegex(ValueError, "already been migrated"):
+            migrate_sqlite(self.directory.name, target)
+        with target.connect(write=True) as db:
+            self.assertEqual(person_by_email(db, "owner@example.com")["id"], person)
+            self.assertEqual(person_by_email(db, "É@EXAMPLE.COM")["id"], "guest-1")
+            self.assertEqual(person_by_email(db, "é@EXAMPLE.COM")["id"], "guest-2")
+            self.assertEqual(db.execute("SELECT person FROM sessions WHERE token=?", (digest(cookie),))
+                             .fetchone()["person"], person)
+            db.execute("DELETE FROM ceremonies WHERE token=? RETURNING *", ("ceremony-fixture",)).fetchone()
+            self.assertIsNone(db.execute("SELECT * FROM pending_signups").fetchone())
+
+        Sanic.unregister_app(self.app)
+        with patch.dict(os.environ, {"IDENTITY_STORAGE": "mariadb"}):
+            app = create_app(ORIGIN, target_directory)
+        self.addCleanup(Sanic.unregister_app, app)
+        self.client = SanicASGITestClient(app, base_url=ORIGIN)
+        self.assertEqual((await self.call_api("get", "/jwks.json")).json, keys)
+        headers = {**USER_AGENT, "Cookie": "__Host-obscuretone_session=" + cookie}
+        self.assertEqual((await self.call_api("get", "/manage", headers=headers)).status_code, 200)
+        await self.login(owner)
+        with target.connect() as db:
+            self.assertEqual(db.execute("SELECT sign_count FROM passkeys").fetchone()["sign_count"], 2)
 
 
 if __name__ == "__main__":

@@ -95,3 +95,37 @@ Revoking a grant invalidates provider-side codes and opaque access tokens immedi
 The integration tests simulate a WebAuthn authenticator and verify its signed assertions, validate an ID token against JWKS, and exercise admin access, per-site authorization and revocation, code replay, and guest recovery. Formal OpenID Foundation conformance testing is a separate step.
 
 Back up the database using SQLite's backup API or while the service is stopped. Retain `signing.pem` and the database together in encrypted, access-controlled storage. Treat invitation links and client secrets as credentials. The repository contains source and sample configuration. Keep live signing material and identity state outside the checkout.
+
+### Rehearse a MariaDB migration
+
+Install `requirements-mariadb.txt` and provision a dedicated empty MariaDB 11.4
+database. Use a consistent SQLite backup with its original `signing.pem`. Put
+the same signing key in the target `IDENTITY_DATA` directory. The migration
+verifies the key and compares the stored rows inside the import transaction.
+
+```sh
+export IDENTITY_STORAGE=mariadb
+export IDENTITY_DATA=/path/to/rehearsal-data
+export IDENTITY_MARIADB_DATABASE=ntka_rehearsal
+export IDENTITY_MARIADB_USER=ntka_rehearsal
+export IDENTITY_MARIADB_PASSWORD_FILE=/path/to/db-password
+export IDENTITY_MARIADB_SOCKET=/path/to/mariadb.sock
+python -m identity migrate-mariadb --source /path/to/sqlite-backup
+python -m identity init
+```
+
+For local TCP, leave `IDENTITY_MARIADB_SOCKET` unset and set
+`IDENTITY_MARIADB_PORT` if MariaDB uses a port other than 3306. Set the same
+storage variables for the web service and the owner commands. Include the
+database and signing key in future backup and recovery rehearsals.
+
+To run the automated migration test, point the MariaDB variables at a separate
+empty fixture database and run the suite with `NTKA_TEST_MARIADB=1` and
+`IDENTITY_STORAGE=sqlite`. The test creates its own SQLite identity and checks
+session, signing-key and passkey continuity on the imported database.
+
+Verify discovery and JWKS, the existing owner passkey, an existing session,
+and a granted and denied relying-party sign-in before scheduling a cutover.
+A real cutover needs a final SQLite backup with writes paused. Retain the
+SQLite source for rollback and account for MariaDB writes before restoring
+service from that snapshot. SQLite remains the default storage backend.

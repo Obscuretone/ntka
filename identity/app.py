@@ -3,7 +3,7 @@ import logging
 import os
 import re
 import secrets
-import sqlite3
+import time
 from hmac import compare_digest
 from pathlib import Path
 from urllib.parse import parse_qs, urlencode, urlsplit
@@ -28,7 +28,10 @@ from webauthn.helpers.structs import (
 from .branding import Brand
 from .oidc import CLIENT_AUTH, SCOPES, Server, user_info
 from .passwords import register_passwords
-from .storage import Store, can_access, digest, issue_invite, issue_signup_link, log, now, open_signup, reset_passkeys
+from .storage import (
+    ASCII_LOWER, StorageIntegrityError, can_access, digest, issue_invite, issue_signup_link, log, now, open_signup,
+    person_by_email, reset_passkeys, store_from_environment,
+)
 
 
 FILES = Path(__file__).parent
@@ -160,7 +163,7 @@ def create_app(origin=None, directory=None):
     host = urlsplit(origin).netloc
     rp_id = urlsplit(origin).hostname
     okta_metadata = os.environ.get("IDENTITY_OKTA_ENDPOINTS") == "1"
-    store = Store(directory or os.environ.get("IDENTITY_DATA", "instance"))
+    store = store_from_environment(directory)
     key = store.signing_key()
     shortcuts = launcher_shortcuts(store.directory / "launcher.json")
     brand = Brand.from_environment()
@@ -263,10 +266,10 @@ def create_app(origin=None, directory=None):
         with store.connect() as db:
             sites = db.execute(
                 """SELECT id, name, launch FROM sites s WHERE enabled AND
-                (? OR EXISTS (SELECT 1 FROM grants g WHERE g.person=? AND g.site=s.id))
-                ORDER BY name COLLATE NOCASE""", (person["owner"], person["id"]),
+                (? OR EXISTS (SELECT 1 FROM grants g WHERE g.person=? AND g.site=s.id))""",
+                (person["owner"], person["id"]),
             ).fetchall()
-        apps = [dict(site) for site in sites]
+        apps = [dict(site) for site in sorted(sites, key=lambda site: site["name"].translate(ASCII_LOWER))]
         if person["owner"]:
             registered = {site["launch"] for site in sites}
             apps.extend(dict(shortcut) for shortcut in shortcuts if shortcut["launch"] not in registered)
@@ -311,7 +314,7 @@ def create_app(origin=None, directory=None):
                             return problem("Enter a name and valid email address.")
                         if not open_signup(db, subject):
                             return problem("This sign-up link is invalid, expired, or full.", 403)
-                        if db.execute("SELECT 1 FROM people WHERE email=?", (email,)).fetchone():
+                        if person_by_email(db, email):
                             return problem("Use your existing passkey or ask the site owner for access.", 409)
                         person = {"id": str(uuid4()), "email": email, "name": name}
                 else:
@@ -422,7 +425,7 @@ def create_app(origin=None, directory=None):
                         db.execute("DELETE FROM sessions WHERE token=?", (digest(previous),))
                         result.delete_cookie(SESSION_COOKIE, host_prefix=True)
                     log(db, "Passkey enrolled", person["email"])
-        except (WebAuthnException, ValueError, TypeError, KeyError, sqlite3.IntegrityError):
+        except (WebAuthnException, ValueError, TypeError, KeyError, StorageIntegrityError):
             return problem("Passkey verification failed. Try again.", 403)
         result.delete_cookie(FLOW_COOKIE, host_prefix=True)
         return result
@@ -433,7 +436,8 @@ def create_app(origin=None, directory=None):
         if not person:
             return response.redirect("/")
         with store.connect() as db:
-            count = db.execute("SELECT COUNT(*) FROM passkeys WHERE person=?", (person["id"],)).fetchone()[0]
+            count = db.execute("SELECT COUNT(*) AS total FROM passkeys WHERE person=?",
+                               (person["id"],)).fetchone()["total"]
         return page("account", person=person, count=count)
 
     @app.post("/sign-out")
@@ -587,8 +591,13 @@ def management_page(store, person, page, *, notice=None, error=None, setup=None)
             "SELECT site, remaining FROM signup_links WHERE expires>?", (now(),),
         )}
         grants = {(row["person"], row["site"]) for row in db.execute("SELECT * FROM grants")}
-        audit = db.execute("SELECT event, detail, datetime(at, 'unixepoch') AS date FROM audit "
-                           "ORDER BY id DESC LIMIT 20").fetchall()
+        audit = [dict(entry) for entry in db.execute(
+            "SELECT event, detail, at FROM audit ORDER BY id DESC LIMIT 20",
+        )]
+        for entry in audit:
+            at = entry.pop("at")
+            entry["date"] = (time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(at))
+                             if -62167219200 <= at <= 253402300799 else None)
     result = page("manage", person=person, guests=guests, sites=sites, grants=grants, audit=audit,
                   notice=notice, error=error, setup=setup, signup_links=signup_links)
     if error:
@@ -653,7 +662,9 @@ def update_management(store, owner, form, origin, page):
                 log(db, notice, app["name"])
             elif action in {"grant", "revoke"} and guest and app:
                 if action == "grant":
-                    db.execute("INSERT OR IGNORE INTO grants VALUES (?, ?)", (person, site))
+                    existing = db.execute("SELECT 1 FROM grants WHERE person=? AND site=?", (person, site))
+                    if existing.fetchone() is None:
+                        db.execute("INSERT INTO grants VALUES (?, ?)", (person, site))
                     notice = "Site access granted."
                 else:
                     for table in ("grants", "codes", "tokens"):
@@ -681,7 +692,7 @@ def update_management(store, owner, form, origin, page):
                 raise ValueError("This action is unavailable.")
     except ValueError as error:
         return management_page(store, owner, page, error=str(error))
-    except sqlite3.IntegrityError:
+    except StorageIntegrityError:
         return management_page(store, owner, page, error="A guest with that email already exists.")
     if setup:
         return management_page(store, owner, page, setup=setup, notice=notice)

@@ -6,9 +6,17 @@ import tempfile
 import time
 from contextlib import contextmanager
 from pathlib import Path
+from string import ascii_lowercase, ascii_uppercase
 from uuid import uuid4
 
 from joserfc.jwk import RSAKey
+
+
+ASCII_LOWER = str.maketrans(ascii_uppercase, ascii_lowercase)
+
+
+class StorageIntegrityError(Exception):
+    pass
 
 
 SCHEMA = """
@@ -131,6 +139,29 @@ def can_access(db, person, site):
     ).fetchone() is not None
 
 
+def person_by_email(db, email):
+    match, address = db.email_match(email)
+    return db.execute("SELECT p.* FROM people p WHERE " + match, (address,)).fetchone()
+
+
+class SQLiteConnection(sqlite3.Connection):
+    @staticmethod
+    def email_match(email):
+        return "p.email=?", email
+
+
+def store_from_environment(directory=None):
+    directory = directory or os.environ.get("IDENTITY_DATA", "instance")
+    backend = os.environ.get("IDENTITY_STORAGE", "sqlite")
+    if backend == "sqlite":
+        return Store(directory)
+    if backend == "mariadb":
+        from .mariadb_store import MariaDBStore
+
+        return MariaDBStore.from_environment(directory)
+    raise ValueError("IDENTITY_STORAGE must be sqlite or mariadb.")
+
+
 class Store:
     def __init__(self, directory):
         self.directory = Path(directory)
@@ -171,7 +202,7 @@ class Store:
 
     @contextmanager
     def connect(self, write=False):
-        db = sqlite3.connect(self.database, timeout=3, isolation_level=None)
+        db = sqlite3.connect(self.database, timeout=3, isolation_level=None, factory=SQLiteConnection)
         db.row_factory = sqlite3.Row
         db.execute("PRAGMA foreign_keys=ON")
         try:
@@ -180,6 +211,10 @@ class Store:
             yield db
             if write:
                 db.commit()
+        except sqlite3.IntegrityError as error:
+            if write:
+                db.rollback()
+            raise StorageIntegrityError from error
         except BaseException:
             if write:
                 db.rollback()
@@ -206,7 +241,7 @@ class Store:
 
     def recover(self, email):
         with self.connect(write=True) as db:
-            person = db.execute("SELECT * FROM people WHERE email=? AND enabled", (email,)).fetchone()
-            if not person:
+            person = person_by_email(db, email)
+            if not person or not person["enabled"]:
                 raise ValueError("No enabled account matches that email.")
             return reset_passkeys(db, person["id"], person["email"])

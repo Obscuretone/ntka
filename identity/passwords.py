@@ -16,7 +16,7 @@ from urllib.parse import urlsplit
 from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
 from uuid import uuid4
 
-from .storage import digest, now
+from .storage import digest, now, person_by_email
 
 CODE_LIFETIME = 900
 EMAIL = re.compile(r"[a-z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-z0-9-]+(?:\.[a-z0-9-]+)+")
@@ -37,11 +37,12 @@ def allowed(store, action, email, limit, total, window=900):
     current = now()
     with store.connect(write=True) as db:
         db.execute("DELETE FROM password_attempts WHERE expires<=?", (current,))
-        count, matching = db.execute(
-            "SELECT count(*), count(CASE WHEN email=? THEN 1 END) FROM password_attempts WHERE action=?",
+        counts = db.execute(
+            "SELECT count(*) AS total, count(CASE WHEN email=? THEN 1 END) AS matching "
+            "FROM password_attempts WHERE action=?",
             (email, action),
         ).fetchone()
-        if count >= total or matching >= limit:
+        if counts["total"] >= total or counts["matching"] >= limit:
             return False
         db.execute("INSERT INTO password_attempts VALUES (?, ?, ?)",
                    (action, email, current + window))
@@ -143,9 +144,10 @@ def register_passwords(app, store, page, target_for, start_session):
         if not allowed(store, "sign-in", email, 12, 240):
             return form("sign-in", target, status=429, error="Too many attempts. Try again later.")
         with store.connect() as db:
+            match, address = db.email_match(email)
             saved = db.execute(
-                """SELECT p.id, c.salt, c.hash FROM people p JOIN passwords c ON c.person=p.id
-                   WHERE p.email=? AND p.enabled AND NOT p.owner""", (email,),
+                "SELECT p.id, c.salt, c.hash FROM people p JOIN passwords c ON c.person=p.id "
+                "WHERE " + match + " AND p.enabled AND NOT p.owner", (address,),
             ).fetchone()
         async with hash_slots:
             actual = await asyncio.to_thread(hash_password, password, saved["salt"] if saved else bytes(16))
@@ -173,7 +175,7 @@ def register_passwords(app, store, page, target_for, start_session):
         with store.connect(write=True) as db:
             current = now()
             db.execute("DELETE FROM password_signup WHERE expires<=?", (current,))
-            exists = db.execute("SELECT 1 FROM people WHERE email=?", (email,)).fetchone()
+            exists = person_by_email(db, email) is not None
             if not exists:
                 db.execute("INSERT INTO password_signup VALUES (?, ?, ?)",
                            (digest(token), email, current + CODE_LIFETIME))
@@ -207,7 +209,7 @@ def register_passwords(app, store, page, target_for, start_session):
                 hashed = await asyncio.to_thread(hash_password, password, salt)
             with store.connect(write=True) as db:
                 if (db.execute(pending, (lookup[0], email, now())).fetchone()
-                        and not db.execute("SELECT 1 FROM people WHERE email=?", (email,)).fetchone()):
+                        and not person_by_email(db, email)):
                     person = str(uuid4())
                     db.execute("INSERT INTO people (id, name, email, email_verified) VALUES (?, ?, ?, 1)",
                                (person, name, email))
