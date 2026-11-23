@@ -183,6 +183,10 @@ class Store:
             if "code" not in {row["name"] for row in db.execute("PRAGMA table_info(tokens)")}:
                 db.execute("ALTER TABLE tokens ADD COLUMN code TEXT")
             db.execute("CREATE INDEX IF NOT EXISTS tokens_code ON tokens(code)")
+        self.initialize_signing_key()
+
+    def initialize_signing_key(self):
+        self.directory.mkdir(mode=0o700, parents=True, exist_ok=True)
         if not self.keyfile.exists():
             with tempfile.NamedTemporaryFile(dir=self.directory, prefix=".signing-", delete=False) as output:
                 temporary = Path(output.name)

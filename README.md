@@ -6,7 +6,40 @@ A self-hosted Sanic identity provider for a single owner and individually grante
 
 The screenshot shows a demo guest account with fictional site grants. See how NTKA fits into the [self-hosted stack](https://obscuretone.com/posts/en/self_hosted_tools).
 
-## Run locally or behind an HTTPS proxy
+## Fresh MariaDB installation
+
+Use Python 3.11 or newer, MariaDB 11.4 or newer, and a trusted HTTPS origin.
+Provision a dedicated empty database. The simplest same-host setup uses a
+MariaDB account with Unix socket authentication and a matching OS service
+account. For example, with an OS user called `ntka`:
+
+```sql
+CREATE DATABASE ntka CHARACTER SET utf8mb4 COLLATE utf8mb4_nopad_bin;
+CREATE USER 'ntka'@'localhost' IDENTIFIED VIA unix_socket;
+GRANT ALL PRIVILEGES ON ntka.* TO 'ntka'@'localhost';
+```
+
+Set the values in [the configuration template](deploy/identity-mariadb.env.example)
+for the service and CLI. Set `IDENTITY_DATA` to a private directory owned by the
+service account and outside the release checkout. Start with a deliberate HTTPS
+issuer and keep its hostname stable. Run the following with that environment
+as the service account:
+
+```sh
+python3 -m venv .venv
+.venv/bin/python -m pip install -r requirements-mariadb.txt
+.venv/bin/python -m identity init
+.venv/bin/python -m identity serve --port 8799
+```
+
+Initialization builds the MariaDB schema and creates the private signing key
+outside the checkout. Repeating it verifies the existing key. Back up MariaDB
+and the signing key together in encrypted, access-controlled storage. To move
+an existing instance, preserve the issuer and key and follow the migration
+procedure below. Configure the reverse proxy to forward the configured host
+to loopback and omit authorization and token URLs from access logs.
+
+## Local development with SQLite
 
 Use Python 3.11 or newer, SQLite 3.35 or newer, and a trusted HTTPS origin. Set the reverse proxy to pass your configured host, forward to loopback, and leave authorization and token URLs out of access logs.
 
@@ -21,7 +54,7 @@ export IDENTITY_DATA=/path/to/private/identity-state
 
 Keep the origin stable. WebAuthn credentials are bound to its hostname, and relying parties use it as the OpenID Connect issuer. The process serves one Sanic worker and stores identity state on local disk. Run initialization and owner commands as the service user with the same environment and working directory.
 
-The included Debian deployment uses systemd, nginx, Certbot, and two DNS names pointed at the server. The provided configuration targets Obscuretone. For another installation, substitute your hostnames, state paths, and TLS conventions before running the installer. The Certbot flow expects an existing ACME account and nginx TLS options under `/etc/letsencrypt`.
+The included Debian deployment uses systemd, nginx, Certbot, and two DNS names pointed at the server. It targets Obscuretone and uses SQLite unless storage settings and requirements are changed. The fresh MariaDB instructions above use a dedicated service account and its own environment. For another installation, configure your hostnames, state paths, and TLS conventions. The Certbot flow expects an existing ACME account and nginx TLS options under `/etc/letsencrypt`.
 
 The included updater handles code-only changes when the installed dependencies and proxy configuration match the checkout. It preserves the database and keeps the previous code available for rollback. Back up state before upgrading dependencies or deployment settings.
 
@@ -123,6 +156,8 @@ To run the automated migration test, point the MariaDB variables at a separate
 empty fixture database and run the suite with `NTKA_TEST_MARIADB=1` and
 `IDENTITY_STORAGE=sqlite`. The test creates its own SQLite identity and checks
 session, signing-key and passkey continuity on the imported database.
+Run the fresh MariaDB test with `NTKA_TEST_MARIADB_FRESH=1` and a different empty
+fixture database. It checks initialization, key matching and owner passkey sign-in.
 
 Verify discovery and JWKS, the existing owner passkey, an existing session,
 and a granted and denied relying-party sign-in before scheduling a cutover.

@@ -279,6 +279,39 @@ class IdentityTest(unittest.IsolatedAsyncioTestCase):
         new_guest = await self.enroll(replacement)
         await self.login(new_guest)
 
+    @unittest.skipUnless(os.environ.get("NTKA_TEST_MARIADB_FRESH"), "requires a separate empty MariaDB fixture database")
+    async def test_fresh_mariadb_initialization_does_not_create_sqlite(self):
+        from identity.mariadb_store import MariaDBStore
+
+        target_directory = Path(self.directory.name) / "fresh-mariadb"
+        target = MariaDBStore.from_environment(target_directory)
+        with target.raw_connection() as connection, connection.cursor() as cursor:
+            cursor.execute("SHOW TABLES")
+            self.assertFalse(cursor.fetchall(), "Use an empty fixture database.")
+        target.initialize()
+        key_bytes = target.keyfile.read_bytes()
+        target.initialize()
+        self.assertEqual(target.keyfile.read_bytes(), key_bytes)
+        self.assertEqual(target.keyfile.stat().st_mode & 0o777, 0o600)
+        self.assertFalse(target.database.exists())
+        other = MariaDBStore(target_directory / "unrelated", target.options)
+        other.initialize_signing_key()
+        with self.assertRaisesRegex(ValueError, "does not match"):
+            other.initialize()
+        self.assertEqual(target.keyfile.read_bytes(), key_bytes)
+
+        Sanic.unregister_app(self.app)
+        with patch.dict(os.environ, {"IDENTITY_STORAGE": "mariadb"}):
+            app = create_app(ORIGIN, target_directory)
+        self.addCleanup(Sanic.unregister_app, app)
+        self.client = SanicASGITestClient(app, base_url=ORIGIN)
+        discovery = await self.call_api("get", "/.well-known/openid-configuration")
+        self.assertEqual(discovery.json["issuer"], ORIGIN)
+        self.assertTrue((await self.call_api("get", "/jwks.json")).json["keys"])
+        owner = await self.enroll(target.owner_invite("Owner", "owner@example.com"))
+        await self.login(owner)
+        self.assertEqual((await self.call_api("get", "/manage")).status_code, 200)
+
     @unittest.skipUnless(os.environ.get("NTKA_TEST_MARIADB"), "requires an empty MariaDB fixture database")
     async def test_sqlite_migration_preserves_identity_and_session(self):
         from identity.mariadb_store import MariaDBStore

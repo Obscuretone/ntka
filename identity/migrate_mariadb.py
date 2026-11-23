@@ -6,7 +6,7 @@ from contextlib import closing
 
 import pymysql
 
-from .mariadb_store import SCHEMA, signing_fingerprint
+from .mariadb_store import database_tables, prepare_schema, signing_fingerprint
 from .storage import Store
 
 
@@ -33,7 +33,6 @@ LEGACY_FIELDS = {
     ("people", "enrolled"): "CASE WHEN id IN (SELECT person FROM passkeys) THEN 1 ELSE 0 END",
     ("tokens", "code"): "NULL",
 }
-TABLE_OPTIONS = " ENGINE=InnoDB DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_nopad_bin"
 
 
 def source_queries(db):
@@ -60,20 +59,6 @@ def source_queries(db):
         select = ", ".join(fields)
         queries[table] = f'SELECT {select} FROM "{table}"'
     return queries
-
-
-def prepare_schema(cursor):
-    cursor.execute(
-        "SELECT TABLE_NAME AS name, TABLE_TYPE AS kind, ENGINE AS engine "
-        "FROM information_schema.TABLES WHERE TABLE_SCHEMA=DATABASE()",
-    )
-    allowed = {*TABLE_COLUMNS, "identity_storage"}
-    if any(row["name"] not in allowed or row["kind"] != "BASE TABLE" or row["engine"] != "InnoDB"
-           for row in cursor.fetchall()):
-        raise ValueError("The migration target must be a dedicated NTKA database.")
-    for statement in SCHEMA.strip().rstrip(";").split(";"):
-        cursor.execute(statement.strip() + TABLE_OPTIONS)
-    cursor.execute("INSERT INTO identity_storage (id) VALUES (1) ON DUPLICATE KEY UPDATE id=id")
 
 
 def copy_table(source, query, target, table, columns):
@@ -106,12 +91,9 @@ def migrate_sqlite(directory, store):
         if snapshot.execute("PRAGMA foreign_key_check").fetchone():
             raise ValueError("The source snapshot has inconsistent foreign keys.")
         queries = source_queries(snapshot)
-        with store.raw_connection() as connection, connection.cursor() as target:
+        with store.schema_connection() as (connection, target):
             try:
-                target.execute("SELECT GET_LOCK(CONCAT('ntka-migrate-', SHA2(DATABASE(), 256)), 5) AS held")
-                if target.fetchone()["held"] != 1:
-                    raise ValueError("Another migration is using the target database.")
-                prepare_schema(target)
+                prepare_schema(target, database_tables(target))
                 connection.begin()
                 target.execute("SELECT signing_fingerprint FROM identity_storage WHERE id=1 FOR UPDATE")
                 if target.fetchone()["signing_fingerprint"]:

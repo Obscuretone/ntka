@@ -1,4 +1,4 @@
-"""MariaDB 11.4 storage for a migrated NTKA instance."""
+"""MariaDB 11.4 storage for NTKA."""
 
 import os
 from contextlib import contextmanager
@@ -97,6 +97,30 @@ CREATE TABLE IF NOT EXISTS audit (
 );
 """
 
+TABLE_OPTIONS = " ENGINE=InnoDB DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_nopad_bin"
+TABLES = {
+    statement.split(maxsplit=6)[5]: statement.strip()
+    for statement in SCHEMA.strip().rstrip(";").split(";")
+}
+
+
+def database_tables(cursor):
+    cursor.execute(
+        "SELECT TABLE_NAME AS name, TABLE_TYPE AS kind, ENGINE AS engine "
+        "FROM information_schema.TABLES WHERE TABLE_SCHEMA=DATABASE()",
+    )
+    rows = cursor.fetchall()
+    if any(row["name"] not in TABLES or row["kind"] != "BASE TABLE" or row["engine"] != "InnoDB" for row in rows):
+        raise ValueError("Use a dedicated NTKA database with InnoDB tables.")
+    return {row["name"] for row in rows}
+
+
+def prepare_schema(cursor, existing):
+    for name, statement in TABLES.items():
+        if name not in existing:
+            cursor.execute(statement + TABLE_OPTIONS)
+    cursor.execute("INSERT INTO identity_storage (id) VALUES (1) ON DUPLICATE KEY UPDATE id=id")
+
 
 def signing_fingerprint(key):
     if not key.is_private:
@@ -154,15 +178,44 @@ class MariaDBStore(Store):
         finally:
             connection.close()
 
+    @contextmanager
+    def schema_connection(self):
+        with self.raw_connection() as connection, connection.cursor() as cursor:
+            cursor.execute("SELECT GET_LOCK(CONCAT('ntka-migrate-', SHA2(DATABASE(), 256)), 5) AS held")
+            if cursor.fetchone()["held"] != 1:
+                raise ValueError("Another initialization or migration is using the target database.")
+            yield connection, cursor
+
     def initialize(self):
-        self.signing_key()
+        with self.schema_connection() as (_, cursor):
+            existing = database_tables(cursor)
+            if "identity_storage" in existing:
+                cursor.execute("SELECT signing_fingerprint FROM identity_storage WHERE id=1")
+                record = cursor.fetchone()
+                if record and record["signing_fingerprint"]:
+                    if existing != TABLES.keys():
+                        raise ValueError("The initialized NTKA database is missing tables.")
+                    self.check_signing_key(record)
+                    return
+
+            for name in existing - {"identity_storage"}:
+                cursor.execute(f"SELECT 1 FROM `{name}` LIMIT 1")
+                if cursor.fetchone():
+                    raise ValueError("The unfinished NTKA database contains data. Verify it before initializing.")
+            prepare_schema(cursor, existing)
+            self.initialize_signing_key()
+            fingerprint = signing_fingerprint(super().signing_key())
+            cursor.execute("UPDATE identity_storage SET signing_fingerprint=%s WHERE id=1", (fingerprint,))
 
     def signing_key(self):
-        key = super().signing_key()
         with self.connect() as db:
             record = db.execute("SELECT signing_fingerprint FROM identity_storage WHERE id=1").fetchone()
-            if record["signing_fingerprint"] != signing_fingerprint(key):
-                raise ValueError("The signing key does not match the migrated MariaDB instance.")
+        return self.check_signing_key(record)
+
+    def check_signing_key(self, record):
+        key = super().signing_key()
+        if record["signing_fingerprint"] != signing_fingerprint(key):
+            raise ValueError("The signing key does not match the MariaDB instance.")
         return key
 
     @contextmanager
@@ -176,7 +229,7 @@ class MariaDBStore(Store):
                 statement = "SELECT signing_fingerprint FROM identity_storage WHERE id=1"
                 record = db.execute(statement + (" FOR UPDATE" if write else "")).fetchone()
                 if not record or not record["signing_fingerprint"]:
-                    raise ValueError("Run migrate-mariadb before using the MariaDB instance.")
+                    raise ValueError("Run identity init or migrate-mariadb before using the MariaDB instance.")
                 yield db
                 if write:
                     connection.commit()

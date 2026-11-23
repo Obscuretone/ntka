@@ -36,14 +36,6 @@ from .storage import (
 
 FILES = Path(__file__).parent
 LOGGER = logging.getLogger(__name__)
-APP_ICONS = {
-    "tasks.obscuretone.com": "nira",
-    "docs.obscuretone.com": "nonfluence",
-    "taste.obscuretone.com": "taste",
-    "studio.obscuretone.com": "studio",
-    "commerce.obscuretone.com": "commerce",
-    "status.obscuretone.com": "status",
-}
 SESSION_COOKIE = "obscuretone_session"
 FLOW_COOKIE = "obscuretone_flow"
 SESSION_SECONDS = 3600
@@ -273,8 +265,6 @@ def create_app(origin=None, directory=None):
         if person["owner"]:
             registered = {site["launch"] for site in sites}
             apps.extend(dict(shortcut) for shortcut in shortcuts if shortcut["launch"] not in registered)
-        for entry in apps:
-            entry["icon"] = APP_ICONS.get(urlsplit(entry["launch"]).hostname, "app")
         return page("dashboard", person=person, sites=sorted(
             apps, key=lambda entry: entry["name"].casefold()))
 
