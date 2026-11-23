@@ -1,4 +1,5 @@
 import json
+import logging
 import os
 import re
 import secrets
@@ -27,10 +28,19 @@ from webauthn.helpers.structs import (
 from .branding import Brand
 from .oidc import CLIENT_AUTH, SCOPES, Server, user_info
 from .passwords import register_passwords
-from .storage import Store, can_access, digest, issue_invite, log, now, reset_passkeys
+from .storage import Store, can_access, digest, issue_invite, issue_signup_link, log, now, open_signup, reset_passkeys
 
 
 FILES = Path(__file__).parent
+LOGGER = logging.getLogger(__name__)
+APP_ICONS = {
+    "tasks.obscuretone.com": "nira",
+    "docs.obscuretone.com": "nonfluence",
+    "taste.obscuretone.com": "taste",
+    "studio.obscuretone.com": "studio",
+    "commerce.obscuretone.com": "commerce",
+    "status.obscuretone.com": "status",
+}
 SESSION_COOKIE = "obscuretone_session"
 FLOW_COOKIE = "obscuretone_flow"
 SESSION_SECONDS = 3600
@@ -82,6 +92,30 @@ def valid_https(value):
         return False
 
 
+def launcher_shortcuts(path):
+    try:
+        config = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return []
+    except (OSError, ValueError):
+        LOGGER.warning("Could not read launcher.json.")
+        return []
+
+    if not isinstance(config, list):
+        LOGGER.warning("Expected a list in launcher.json.")
+        return []
+    shortcuts = {}
+    for entry in config:
+        if isinstance(entry, dict):
+            name, launch = entry.get("name"), entry.get("launch")
+            if (isinstance(name, str) and 1 <= len(name.strip()) <= 80
+                    and isinstance(launch, str) and valid_https(launch)):
+                shortcuts.setdefault(launch, {"name": name.strip(), "launch": launch})
+                continue
+        LOGGER.warning("Ignored an invalid launcher shortcut.")
+    return list(shortcuts.values())
+
+
 def valid_email(value):
     return len(value) <= 254 and re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", value)
 
@@ -115,6 +149,10 @@ def new_session(db, result, person, previous, fresh_for):
     set_cookie(result, SESSION_COOKIE, token, SESSION_SECONDS)
 
 
+def is_form_encoded(request):
+    return request.content_type.partition(";")[0].strip().lower() == "application/x-www-form-urlencoded"
+
+
 def create_app(origin=None, directory=None):
     origin = origin or os.environ.get("IDENTITY_ORIGIN", "")
     if not valid_https(origin) or origin != "https://" + urlsplit(origin).netloc:
@@ -124,6 +162,7 @@ def create_app(origin=None, directory=None):
     okta_metadata = os.environ.get("IDENTITY_OKTA_ENDPOINTS") == "1"
     store = Store(directory or os.environ.get("IDENTITY_DATA", "instance"))
     key = store.signing_key()
+    shortcuts = launcher_shortcuts(store.directory / "launcher.json")
     brand = Brand.from_environment()
     app = Sanic("obscuretone_identity")
     app.config.REQUEST_MAX_SIZE = 64 * 1024
@@ -227,11 +266,22 @@ def create_app(origin=None, directory=None):
                 (? OR EXISTS (SELECT 1 FROM grants g WHERE g.person=? AND g.site=s.id))
                 ORDER BY name COLLATE NOCASE""", (person["owner"], person["id"]),
             ).fetchall()
-        return page("dashboard", person=person, sites=sites)
+        apps = [dict(site) for site in sites]
+        if person["owner"]:
+            registered = {site["launch"] for site in sites}
+            apps.extend(dict(shortcut) for shortcut in shortcuts if shortcut["launch"] not in registered)
+        for entry in apps:
+            entry["icon"] = APP_ICONS.get(urlsplit(entry["launch"]).hostname, "app")
+        return page("dashboard", person=person, sites=sorted(
+            apps, key=lambda entry: entry["name"].casefold()))
 
     @app.get("/enroll")
     async def enroll(request):
         return page("signin", mode="invite", target="/")
+
+    @app.get("/join")
+    async def join(request):
+        return page("signin", mode="signup", target="/")
 
     @app.post("/passkeys/<purpose>/begin")
     async def begin(request, purpose):
@@ -244,13 +294,26 @@ def create_app(origin=None, directory=None):
             if purpose == "login":
                 subject = local_target(data.get("target"))
                 options = generate_authentication_options(rp_id=rp_id, user_verification=UV)
-            elif purpose in {"invite", "backup"}:
-                if purpose == "invite":
+            elif purpose in {"invite", "backup", "signup"}:
+                if purpose in {"invite", "signup"}:
                     invite = data.get("invite", "")
                     if not isinstance(invite, str) or not re.fullmatch(r"[A-Za-z0-9_-]{43}", invite):
                         return problem("This invitation is invalid or expired.", 403)
                     subject = digest(invite)
-                    person = invited_person(db, subject)
+                    if purpose == "invite":
+                        person = invited_person(db, subject)
+                    else:
+                        name, email = data.get("name"), data.get("email")
+                        if not isinstance(name, str) or not isinstance(email, str):
+                            return problem("Enter a name and email address.")
+                        name, email = name.strip(), email.strip()
+                        if not 1 <= len(name) <= 80 or not valid_email(email):
+                            return problem("Enter a name and valid email address.")
+                        if not open_signup(db, subject):
+                            return problem("This sign-up link is invalid, expired, or full.", 403)
+                        if db.execute("SELECT 1 FROM people WHERE email=?", (email,)).fetchone():
+                            return problem("Use your existing passkey or ask the site owner for access.", 409)
+                        person = {"id": str(uuid4()), "email": email, "name": name}
                 else:
                     if not session or session["authenticated"] <= now() - FLOW_SECONDS:
                         return problem("Sign out and verify your existing passkey before adding a backup.", 403)
@@ -272,15 +335,21 @@ def create_app(origin=None, directory=None):
                        (now(), digest(cookie_value(request, FLOW_COOKIE))))
             db.execute("INSERT INTO ceremonies VALUES (?, ?, ?, ?, ?)",
                        (digest(handle), options.challenge, purpose, subject, now() + FLOW_SECONDS))
+            if purpose == "signup":
+                db.execute("INSERT INTO pending_signups VALUES (?, ?, ?, ?, ?)",
+                           (digest(handle), subject, person["id"], person["name"], person["email"]))
         result = response.json({"options": json.loads(options_to_json(options))})
         set_cookie(result, FLOW_COOKIE, handle, FLOW_SECONDS)
         return result
 
     @app.post("/passkeys/<purpose>/finish")
     async def finish(request, purpose):
+        handle = digest(cookie_value(request, FLOW_COOKIE))
         with store.connect(write=True) as db:
+            pending = (db.execute("SELECT * FROM pending_signups WHERE ceremony=?", (handle,)).fetchone()
+                       if purpose == "signup" else None)
             flow = db.execute("DELETE FROM ceremonies WHERE token=? RETURNING *",
-                              (digest(cookie_value(request, FLOW_COOKIE)),)).fetchone()
+                              (handle,)).fetchone()
         if not flow or flow["purpose"] != purpose or flow["expires"] <= now():
             return problem("The passkey request has expired. Try again.", 403)
         data = request.json
@@ -321,6 +390,13 @@ def create_app(origin=None, directory=None):
                 else:
                     if purpose == "invite":
                         person = invited_person(db, flow["subject"])
+                    elif purpose == "signup":
+                        if not pending or pending["signup"] != flow["subject"]:
+                            return problem("This sign-up request has expired. Try again.", 403)
+                        signup = open_signup(db, pending["signup"])
+                        if not signup:
+                            return problem("This sign-up link is invalid, expired, or full.", 403)
+                        person = {"id": pending["person"], "name": pending["name"], "email": pending["email"]}
                     else:
                         session = get_session(db, digest(previous))
                         person = (session if session and session["session_token"] == flow["subject"]
@@ -328,14 +404,21 @@ def create_app(origin=None, directory=None):
                     if not person:
                         return problem("This enrollment is invalid or expired.", 403)
                     checked = verify_registration_response(**args)
+                    if purpose == "signup":
+                        db.execute("INSERT INTO people (id, name, email) VALUES (?, ?, ?)",
+                                   (person["id"], person["name"], person["email"]))
+                        db.execute("INSERT INTO grants VALUES (?, ?)", (person["id"], signup["site"]))
+                        db.execute("UPDATE signup_links SET remaining=remaining-1 WHERE token=?", (signup["token"],))
+                        log(db, "Site self-signup", signup["site"])
                     db.execute("INSERT INTO passkeys VALUES (?, ?, ?, ?, ?, ?)", (
                         checked.credential_id, person["id"], checked.credential_public_key,
                         checked.sign_count, "Passkey", now(),
                     ))
                     db.execute("UPDATE people SET enrolled=1 WHERE id=?", (person["id"],))
-                    result = response.json({"next": "/?enrolled=1" if purpose == "invite" else "/account"})
-                    if purpose == "invite":
-                        db.execute("DELETE FROM invitations WHERE token=?", (flow["subject"],))
+                    result = response.json({"next": "/?enrolled=1" if purpose in {"invite", "signup"} else "/account"})
+                    if purpose in {"invite", "signup"}:
+                        if purpose == "invite":
+                            db.execute("DELETE FROM invitations WHERE token=?", (flow["subject"],))
                         db.execute("DELETE FROM sessions WHERE token=?", (digest(previous),))
                         result.delete_cookie(SESSION_COOKIE, host_prefix=True)
                     log(db, "Passkey enrolled", person["email"])
@@ -387,7 +470,7 @@ def create_app(origin=None, directory=None):
     @app.post(OKTA + "/authorize", name="okta_authorize_form")
     @app.post("/authorize")
     async def authorize_form(request):
-        if (request.content_type != "application/x-www-form-urlencoded" or request.query_string
+        if (not is_form_encoded(request) or request.query_string
                 or any(len(request.form.getlist(field)) != 1 for field in request.form)):
             return problem("Expected a form-encoded authorization request.")
         params = {field: request.form.get(field) for field in request.form if field in AUTHORIZATION_PARAMS}
@@ -440,7 +523,7 @@ def create_app(origin=None, directory=None):
     @app.post(OKTA + "/token", name="okta_token")
     @app.post("/token")
     async def token(request):
-        if request.content_type != "application/x-www-form-urlencoded" or request.query_string:
+        if not is_form_encoded(request) or request.query_string:
             return problem("Expected a form-encoded request.")
         if request.headers.get("authorization") and (
             "client_id" in request.form or "client_secret" in request.form
@@ -500,11 +583,14 @@ def management_page(store, person, page, *, notice=None, error=None, setup=None)
     with store.connect() as db:
         guests = db.execute("SELECT * FROM people WHERE NOT owner ORDER BY name").fetchall()
         sites = db.execute("SELECT id, name, launch, enabled FROM sites ORDER BY name").fetchall()
+        signup_links = {row["site"]: row["remaining"] for row in db.execute(
+            "SELECT site, remaining FROM signup_links WHERE expires>?", (now(),),
+        )}
         grants = {(row["person"], row["site"]) for row in db.execute("SELECT * FROM grants")}
         audit = db.execute("SELECT event, detail, datetime(at, 'unixepoch') AS date FROM audit "
                            "ORDER BY id DESC LIMIT 20").fetchall()
     result = page("manage", person=person, guests=guests, sites=sites, grants=grants, audit=audit,
-                  notice=notice, error=error, setup=setup)
+                  notice=notice, error=error, setup=setup, signup_links=signup_links)
     if error:
         result.status = 400
     return result
@@ -554,6 +640,17 @@ def update_management(store, owner, form, origin, page):
                 setup = ("Client secret", secret)
                 notice = "Site created. Client ID " + site
                 log(db, "Site created", name)
+            elif action == "create-signup" and app and app["enabled"]:
+                uses, hours = int(form.get("uses", "20")), int(form.get("hours", "168"))
+                if not 1 <= uses <= 100 or not 1 <= hours <= 168:
+                    raise ValueError("Use 1 to 100 sign-ups and 1 to 168 hours.")
+                setup = ("Site sign-up link", origin + "/join#" + issue_signup_link(db, site, uses, hours))
+                notice = "Sign-up enabled for " + app["name"]
+                log(db, "Site sign-up link issued", app["name"])
+            elif action == "cancel-signup" and app:
+                db.execute("DELETE FROM signup_links WHERE site=?", (site,))
+                notice = "Site sign-up link revoked."
+                log(db, notice, app["name"])
             elif action in {"grant", "revoke"} and guest and app:
                 if action == "grant":
                     db.execute("INSERT OR IGNORE INTO grants VALUES (?, ?)", (person, site))
@@ -577,6 +674,7 @@ def update_management(store, owner, form, origin, page):
                 if not enabled:
                     db.execute("DELETE FROM codes WHERE site=?", (site,))
                     db.execute("DELETE FROM tokens WHERE site=?", (site,))
+                    db.execute("DELETE FROM signup_links WHERE site=?", (site,))
                 notice = "Site enabled." if enabled else "Site disabled."
                 log(db, notice, app["name"])
             else:

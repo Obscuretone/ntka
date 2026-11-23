@@ -52,6 +52,14 @@ CREATE TABLE IF NOT EXISTS grants (
     person TEXT NOT NULL REFERENCES people(id), site TEXT NOT NULL REFERENCES sites(id),
     PRIMARY KEY (person, site)
 );
+CREATE TABLE IF NOT EXISTS signup_links (
+    token TEXT PRIMARY KEY, site TEXT NOT NULL UNIQUE REFERENCES sites(id),
+    expires INTEGER NOT NULL, remaining INTEGER NOT NULL CHECK (remaining >= 0)
+);
+CREATE TABLE IF NOT EXISTS pending_signups (
+    ceremony TEXT PRIMARY KEY REFERENCES ceremonies(token) ON DELETE CASCADE,
+    signup TEXT NOT NULL, person TEXT NOT NULL, name TEXT NOT NULL, email TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS codes (
     token TEXT PRIMARY KEY, person TEXT NOT NULL REFERENCES people(id),
     site TEXT NOT NULL REFERENCES sites(id), callback TEXT NOT NULL,
@@ -85,6 +93,21 @@ def issue_invite(db, person, lifetime):
     db.execute("DELETE FROM invitations WHERE person = ?", (person,))
     db.execute("INSERT INTO invitations VALUES (?, ?, ?)", (digest(token), person, now() + lifetime))
     return token
+
+
+def issue_signup_link(db, site, uses, hours):
+    token = secrets.token_urlsafe(32)
+    db.execute("DELETE FROM signup_links WHERE site=?", (site,))
+    db.execute("INSERT INTO signup_links VALUES (?, ?, ?, ?)", (digest(token), site, now() + hours * 3600, uses))
+    return token
+
+
+def open_signup(db, token):
+    return db.execute(
+        """SELECT l.token, l.site FROM signup_links l JOIN sites s ON s.id=l.site
+        WHERE l.token=? AND l.expires>? AND l.remaining>0 AND s.enabled""",
+        (token, now()),
+    ).fetchone()
 
 
 def log(db, event, detail):
